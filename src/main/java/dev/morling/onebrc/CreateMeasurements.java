@@ -488,6 +488,11 @@ public class CreateMeasurements {
                 new WeatherStation("Zagreb", 10.7),
                 new WeatherStation("Zanzibar City", 26.0),
                 new WeatherStation("Zürich", 9.3));
+        StringBuilder sb=  new StringBuilder();
+        for(WeatherStation s : stations){
+            sb.append('"').append(s.id).append("\",");
+        }
+        System.out.println(sb);
 
         try (BufferedWriter bw = Files.newBufferedWriter(MEASUREMENT_FILE)) {
             for (int i = 0; i < size; i++) {

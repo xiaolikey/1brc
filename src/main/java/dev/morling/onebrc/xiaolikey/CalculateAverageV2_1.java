@@ -9,10 +9,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.util.*;
-import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.stream.Stream;
 
 /**
  * Calculate Average version1 implementation
@@ -21,7 +18,7 @@ import java.util.stream.Stream;
  * @date 2024/12/16
  * @since 0.0.1
  */
-public class CalculateAverageV2 {
+public class CalculateAverageV2_1 {
     private static final String FILE_PATH = "./measurements.txt";
     private static final int MAX_TEMP = 999;
     private static final int MIN_TEMP = -999;
@@ -54,12 +51,14 @@ public class CalculateAverageV2 {
      * 站点统计信息
      */
     public static class StationStatistics {
+        String stationName;
         int min = MIN_TEMP;
         int max = MAX_TEMP;
         int count;
         long sum;
 
-        public StationStatistics(int temperature) {
+        public StationStatistics(String stationName, int temperature) {
+            this.stationName = stationName;
             this.min = temperature;
             this.max = temperature;
             this.count = 1;
@@ -111,30 +110,30 @@ public class CalculateAverageV2 {
             }
             return this;
         }
-//
-//        public FileSegment collect(StationMap statMap) {
-//            while (hasNext()) {
-//                String stationName = nextStation();
-//                int temperature = nextTemperature();
-//                  int index = statMap.getIndex(stationName);
-//                StationStatistics cur = statMap.indexOfValue(index);
-//                if(cur != null){
-//                    cur.add(temperature);
-//                }else{
-//                    statMap.setValue(index, new StationStatistics(stationName, temperature));
-//                }
-//            }
-//            return this;
-//        }
+
+        public FileSegment collect(StationMap statMap) {
+            while (hasNext()) {
+                String stationName = nextStation();
+                int temperature = nextTemperature();
+                int index = statMap.getIndex(stationName);
+                StationStatistics cur = statMap.indexOfValue(index);
+                if (cur != null) {
+                    cur.add(temperature);
+                } else {
+                    statMap.setValue(index, new StationStatistics(stationName, temperature));
+                }
+            }
+            return this;
+        }
 
         public FileSegment collect(Map<String, StationStatistics> statMap) {
             while (hasNext()) {
                 String stationName = nextStation();
                 int temperature = nextTemperature();
                 StationStatistics cur = statMap.get(stationName);
-                if(cur == null){
-                    statMap.put(stationName, new StationStatistics(temperature));
-                }else{
+                if (cur == null) {
+                    statMap.put(stationName, new StationStatistics(stationName, temperature));
+                } else {
                     cur.add(temperature);
                 }
             }
@@ -228,29 +227,31 @@ public class CalculateAverageV2 {
         return regions;
     }
 
-//    private static class StationMap {
-//        StationStatistics[] stations = new StationStatistics[STATION_CAPACITY];
-//
-//        public int getIndex(String key) {
-//            int hash = key.hashCode();
-//            int slot = (hash ^ (hash >>> 16)) & (STATION_CAPACITY - 1);
-//            while (stations[slot] != null && !stations[slot].stationName.equals(key)) {
-//                slot++;
-//                if (slot == STATION_CAPACITY) {
-//                    slot = 0;
-//                }
-//            }
-//            return slot;
-//        }
-//
-//        public StationStatistics indexOfValue(int index) {
-//            return stations[index];
-//        }
-//
-//        public void setValue(int index, StationStatistics value) {
-//            stations[index] = value;
-//        }
-//    }
+    private static class StationMap {
+        StationStatistics[] stations = new StationStatistics[STATION_CAPACITY];
+        List<Integer> indexList = new ArrayList<>();
+
+        public int getIndex(String key) {
+            int hash = key.hashCode();
+            int slot = (hash ^ (hash >>> 16)) & (STATION_CAPACITY - 1);
+            while (stations[slot] != null && !stations[slot].stationName.equals(key)) {
+                slot++;
+                if (slot == STATION_CAPACITY) {
+                    slot = 0;
+                }
+            }
+            return slot;
+        }
+
+        public StationStatistics indexOfValue(int index) {
+            return stations[index];
+        }
+
+        public void setValue(int index, StationStatistics value) {
+            stations[index] = value;
+            indexList.add(index);
+        }
+    }
 
     public static void main(String[] args) throws Exception {
         Path filePath = Paths.get(FILE_PATH);
@@ -260,29 +261,35 @@ public class CalculateAverageV2 {
 
         // 使用并行流处理每个文件块
         int coreNum = Runtime.getRuntime().availableProcessors();
-        Map<String, StationStatistics>[] stationMaps = new HashMap[coreNum];
+        StationMap[] stationMaps = new StationMap[coreNum];
         Thread[] threads = new Thread[coreNum];
         for (int i = 0; i < coreNum; i++) {
-            Map<String, StationStatistics> stationMap = new HashMap<>();
+            StationMap stationMap = new StationMap();
             stationMaps[i] = stationMap;
             Thread thread = new Thread(() -> {
-                for(int segmentIndex = segmentLock.decrementAndGet(); segmentIndex >= 0; segmentIndex = segmentLock.decrementAndGet()){
+                for (int segmentIndex = segmentLock.decrementAndGet(); segmentIndex >= 0; segmentIndex = segmentLock.decrementAndGet()) {
                     segments.get(segmentIndex).loadBytes().collect(stationMap).clear();
                 }
             });
             threads[i] = thread;
             thread.start();
         }
-        for(Thread thread : threads){
+        for (Thread thread : threads) {
             thread.join();
         }
         //Merge result
-        Map<String, StationStatistics> stations = Stream.of(stationMaps).collect(HashMap::new, (m, v) -> {
-            v.forEach((k, vv) -> m.merge(k, vv, (v1, v2) -> {
-                v1.merge(v2);
-                return v1;
-            }));
-        }, HashMap::putAll);
+        Map<String, StationStatistics> stations = new HashMap<>();
+        for (StationMap stationMap : stationMaps) {
+            for (Integer index : stationMap.indexList) {
+                StationStatistics cur = stationMap.indexOfValue(index);
+                StationStatistics old = stations.get(cur.stationName);
+                if (old != null) {
+                    old.merge(cur);
+                } else {
+                    stations.put(cur.stationName, cur);
+                }
+            }
+        }
         System.out.println(new TreeMap<>(stations));
         Path outPath = Paths.get("./result_me.txt");
         try (PrintStream out = new PrintStream(Files.newOutputStream(outPath, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING))) {

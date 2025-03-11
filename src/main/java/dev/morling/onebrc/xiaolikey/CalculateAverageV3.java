@@ -5,7 +5,6 @@ import sun.misc.Unsafe;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.lang.reflect.Field;
-import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -26,8 +25,10 @@ public class CalculateAverageV3 {
     private static final String FILE_PATH = "./measurements.txt";
     private static final int MAX_TEMP = 999;
     private static final int MIN_TEMP = -999;
+    private static final int MAX_NAME_LENGTH = 100;
     //和cpu的level3 cache大小一致，24MB
     private static final long SEGMENT_SIZE = 24 * 1024 * 1024;
+
 
     private static final String[] TEMPERATURE_MAP = new String[999 + 1 + 999];
 
@@ -54,12 +55,22 @@ public class CalculateAverageV3 {
      * 站点统计信息
      */
     public static class StationStatistics {
+        long[] nameWords;
+        int hashCode;
         int min = MIN_TEMP;
         int max = MAX_TEMP;
         int count;
         long sum;
 
         public StationStatistics(int temperature) {
+            this.min = temperature;
+            this.max = temperature;
+            this.count = 1;
+            this.sum = temperature;
+        }
+
+        public StationStatistics(long[] nameWords, int temperature) {
+            this.nameWords = nameWords;
             this.min = temperature;
             this.max = temperature;
             this.count = 1;
@@ -85,6 +96,35 @@ public class CalculateAverageV3 {
             int avg = (int) Math.round((double) sum / count);
             return TEMPERATURE_MAP[min + 999] + "/" + TEMPERATURE_MAP[avg + 999] + "/" + TEMPERATURE_MAP[max + 999];
         }
+
+
+        public int genHashCode() {
+            return hashCode;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            StationStatistics that = (StationStatistics) o;
+            if (nameWords.length != that.nameWords.length) {
+                return false;
+            }
+            for (int i = 0; i < nameWords.length; i++) {
+                if (nameWords[i] != that.nameWords[i]) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        @Override
+        public int hashCode() {
+            return hashCode;
+        }
+
+        public String toStationName() {
+            return "";
+        }
     }
 
     // 定义文件分块信息
@@ -94,7 +134,7 @@ public class CalculateAverageV3 {
         int offset;
         byte[] buffer;
 
-        static  Unsafe unsafe = getUnsafe();
+        static Unsafe unsafe = getUnsafe();
 
         private static Unsafe getUnsafe() {
             //Init Unsafe
@@ -112,7 +152,7 @@ public class CalculateAverageV3 {
         public FileSegment loadBytes() {
             //copy
             this.buffer = new byte[(int) length];
-            for(int i = 0; i < length; i++){
+            for (int i = 0; i < length; i++) {
                 buffer[i] = unsafe.getByte(i + start);
             }
             return this;
@@ -147,14 +187,14 @@ public class CalculateAverageV3 {
             return offset < length;
         }
 
-        public String nextStation() {
+        public String nextStationOld() {
             int start = offset;
             while (buffer[offset++] != ';') {
             }
             return new String(buffer, start, offset - start - 1);
         }
 
-        public int nextTemperature() {
+        public int nextTemperatureOld() {
             int ans = 0;
             boolean positive = true;
             if (buffer[offset] == '-') {
@@ -172,6 +212,74 @@ public class CalculateAverageV3 {
                 ans = ans * 10 + b - '0';
             }
             return positive ? ans : -ans;
+        }
+
+        public String nextStation() {
+            byte b;
+            byte[] buffer = new byte[MAX_NAME_LENGTH];
+            int i = 0;
+            while ((b = unsafe.getByte(offset + start)) != ';') {
+                buffer[i++] = b;
+                offset++;
+            }
+            //skip ";"
+            offset++;
+            return new String(buffer, 0, i);
+        }
+
+        private static final long SEMICOLON_MASK = 0x3B3B3B3B3B3B3B3BL;
+        private static final long HIGH_BIT_MASK = 0x8080808080808080L;
+
+        public long findSemicolon(long chunk) {
+            long diff = chunk ^ SEMICOLON_MASK;
+            return (diff - 0x0101010101010101L) & (~diff & HIGH_BIT_MASK);
+        }
+
+        public int nextTemperature() {
+            int ans = 0;
+            boolean positive = true;
+
+            if (unsafe.getByte(offset + start) == '-') {
+                positive = false;
+                offset++;
+            }
+            while (true) {
+                byte b = unsafe.getByte(offset + start);
+                offset++;
+                if (b == '\n') {
+                    break;
+                }
+                if (b == '.') {
+                    continue;
+                }
+                ans = ans * 10 + b - '0';
+            }
+            return positive ? ans : -ans;
+        }
+
+        public int nextTemperature1() {
+            long startPos = offset + start;
+            long numberWord = unsafe.getLong(startPos);
+            int decimalSepPos = Long.numberOfTrailingZeros(~numberWord & 0x10101000L);
+            long number = convertIntoNumber(decimalSepPos, numberWord);
+            offset += ((decimalSepPos >>> 3) + 4);
+            return (int) number;
+        }
+
+
+        // Special method to convert a number in the ascii number into an int without branches created by Quan Anh Mai.
+        private static long convertIntoNumber(int decimalSepPos, long numberWord) {
+            int shift = 28 - decimalSepPos;
+            // signed is -1 if negative, 0 otherwise
+            long signed = (~numberWord << 59) >> 63;
+            long designMask = ~(signed & 0xFF);
+            // Align the number to a specific position and transform the ascii to digit value
+            long digits = ((numberWord & designMask) << shift) & 0x0F000F0F00L;
+            // Now digits is in the form 0xUU00TTHH00 (UU: units digit, TT: tens digit, HH: hundreds digit)
+            // 0xUU00TTHH00 * (100 * 0x1000000 + 10 * 0x10000 + 1) =
+            // 0x000000UU00TTHH00 + 0x00UU00TTHH000000 * 10 + 0xUU00TTHH00000000 * 100
+            long absValue = ((digits * 0x640a0001) >>> 32) & 0x3FF;
+            return (absValue ^ signed) - signed;
         }
 
     }

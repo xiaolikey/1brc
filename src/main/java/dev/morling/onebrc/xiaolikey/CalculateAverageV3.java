@@ -1,7 +1,10 @@
 package dev.morling.onebrc.xiaolikey;
 
+import sun.misc.Unsafe;
+
 import java.io.IOException;
 import java.io.PrintStream;
+import java.lang.reflect.Field;
 import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
@@ -10,6 +13,7 @@ import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Stream;
 
 /**
  * Calculate Average version1 implementation
@@ -18,11 +22,10 @@ import java.util.concurrent.atomic.AtomicInteger;
  * @date 2024/12/16
  * @since 0.0.1
  */
-public class CalculateAverageV2_1 {
+public class CalculateAverageV3 {
     private static final String FILE_PATH = "./measurements.txt";
-    private static final short MAX_TEMP = 999;
-    private static final short MIN_TEMP = -999;
-    private static final int STATION_CAPACITY = 10000;
+    private static final int MAX_TEMP = 999;
+    private static final int MIN_TEMP = -999;
     //和cpu的level3 cache大小一致，24MB
     private static final long SEGMENT_SIZE = 24 * 1024 * 1024;
 
@@ -31,7 +34,7 @@ public class CalculateAverageV2_1 {
     private static AtomicInteger segmentLock = new AtomicInteger(0);
 
     static {
-        for (short i = 0; i < 1999; i++) {
+        for (int i = 0; i < 1999; i++) {
             int seq = i - 999;
             StringBuilder sb = seq < 0 ? new StringBuilder("-") : new StringBuilder();
             int abs = Math.abs(seq);
@@ -51,30 +54,28 @@ public class CalculateAverageV2_1 {
      * 站点统计信息
      */
     public static class StationStatistics {
-        String stationName;
-        short min = MIN_TEMP;
-        short max = MAX_TEMP;
+        int min = MIN_TEMP;
+        int max = MAX_TEMP;
         int count;
         long sum;
 
-        public StationStatistics(String stationName, short temperature) {
-            this.stationName = stationName;
+        public StationStatistics(int temperature) {
             this.min = temperature;
             this.max = temperature;
             this.count = 1;
             this.sum = temperature;
         }
 
-        public void add(short temperature) {
-            min = (short) Math.min(min, temperature);
-            max = (short) Math.max(max, temperature);
+        public void add(int temperature) {
+            min = Math.min(min, temperature);
+            max = Math.max(max, temperature);
             count++;
             sum += temperature;
         }
 
         public void merge(StationStatistics other) {
-            min = (short) Math.min(min, other.min);
-            max = (short) Math.max(max, other.max);
+            min = Math.min(min, other.min);
+            max = Math.max(max, other.max);
             count += other.count;
             sum += other.sum;
         }
@@ -88,39 +89,45 @@ public class CalculateAverageV2_1 {
 
     // 定义文件分块信息
     public static class FileSegment {
-        final Path filePath;
         final long start;  // 起始位置（字节偏移）
         final long length;// 块长度（字节数）
         int offset;
-        int limit;
         byte[] buffer;
 
+        static  Unsafe unsafe = getUnsafe();
+
+        private static Unsafe getUnsafe() {
+            //Init Unsafe
+            try {
+                Field theUnsafe = Unsafe.class.getDeclaredField("theUnsafe");
+                theUnsafe.setAccessible(true);
+                return (Unsafe) theUnsafe.get(Unsafe.class);
+            } catch (NoSuchFieldException | IllegalAccessException e) {
+                //Init failed
+                System.out.println("初始化Unsafe失败");
+                return null;
+            }
+        }
+
         public FileSegment loadBytes() {
-            try (FileChannel channel = FileChannel.open(filePath, StandardOpenOption.READ)) {
-                MappedByteBuffer buffer = channel.map(
-                        FileChannel.MapMode.READ_ONLY,
-                        start,
-                        length
-                );
-                this.buffer = new byte[buffer.limit()];
-                this.limit = buffer.limit();
-                buffer.get(this.buffer);
-            } catch (IOException e) {
-                //ignore
+            //copy
+            this.buffer = new byte[(int) length];
+            for(int i = 0; i < length; i++){
+                buffer[i] = unsafe.getByte(i + start);
             }
             return this;
         }
 
-        public FileSegment collect(StationMap statMap) {
+
+        public FileSegment collect(Map<String, StationStatistics> statMap) {
             while (hasNext()) {
                 String stationName = nextStation();
-                short temperature = nextTemperature();
-                int index = statMap.getIndex(stationName);
-                StationStatistics cur = statMap.indexOfValue(index);
-                if (cur != null) {
-                    cur.add(temperature);
+                int temperature = nextTemperature();
+                StationStatistics cur = statMap.get(stationName);
+                if (cur == null) {
+                    statMap.put(stationName, new StationStatistics(temperature));
                 } else {
-                    statMap.setValue(index, new StationStatistics(stationName, temperature));
+                    cur.add(temperature);
                 }
             }
             return this;
@@ -131,14 +138,13 @@ public class CalculateAverageV2_1 {
             buffer = null;
         }
 
-        public FileSegment(Path filePath, long start, long length) {
-            this.filePath = filePath;
+        public FileSegment(long start, long length) {
             this.start = start;
             this.length = length;
         }
 
         public boolean hasNext() {
-            return offset < limit;
+            return offset < length;
         }
 
         public String nextStation() {
@@ -148,7 +154,7 @@ public class CalculateAverageV2_1 {
             return new String(buffer, start, offset - start - 1);
         }
 
-        public short nextTemperature() {
+        public int nextTemperature() {
             int ans = 0;
             boolean positive = true;
             if (buffer[offset] == '-') {
@@ -165,7 +171,7 @@ public class CalculateAverageV2_1 {
                 }
                 ans = ans * 10 + b - '0';
             }
-            return (short) (positive ? ans : -ans);
+            return positive ? ans : -ans;
         }
 
     }
@@ -181,8 +187,9 @@ public class CalculateAverageV2_1 {
 
         try (FileChannel channel = FileChannel.open(filePath, StandardOpenOption.READ)) {
             long fileSize = channel.size();
+            final long fileStart = channel.map(FileChannel.MapMode.READ_ONLY, 0, fileSize, java.lang.foreign.Arena.global()).address();
             long position = 0;
-
+            FileSegment globalFileSegment = new FileSegment(fileStart, fileSize);
             while (position < fileSize) {
                 // 计算当前块的实际长度
                 long remaining = fileSize - position;
@@ -190,75 +197,22 @@ public class CalculateAverageV2_1 {
 
                 // 确保块边界对齐到行尾
                 if (position + length < fileSize) {
-                    MappedByteBuffer buffer = channel.map(
-                            FileChannel.MapMode.READ_ONLY,
-                            position,
-                            length
-                    );
-
                     // 查找最后一个换行符
-                    for (int i = buffer.limit() - 1; i >= 0; i--) {
-                        if (buffer.get(i) == '\n') {
+                    long startAddress = fileStart + position;
+                    for (long i = length - 1; i >= 0; i--) {
+                        if (FileSegment.unsafe.getByte(startAddress + i) == '\n') {
                             //包含换行符
                             length = i + 1L;
                             break;
                         }
                     }
                 }
-                regions.add(new FileSegment(filePath, position, length));
+                regions.add(new FileSegment(fileStart + position, length));
                 position += length;
             }
         }
 
         return regions;
-    }
-
-    /**
-     * 自定义站点Map，实际使用的步骤
-     * <li>1. 使用getIndex(key)，获得对应站点的索引</li>
-     * <li>2. 使用第一步获得的index调用indexOfValue(index)方法，获取对应的StationStatistics对象</li>
-     * <li>3. 如果对应为空，直接调用setValue(index, value), 否则执行StationStatistic.merge操作</li>
-     * @see FileSegment#collect(StationMap)
-     */
-    private static class StationMap {
-        StationStatistics[] stations = new StationStatistics[STATION_CAPACITY];
-        List<Integer> indexList = new ArrayList<>();
-
-        /**
-         * 获取对应站点的索引，如果不存在则返回下一个可用的索引
-         * @param key 站点名称
-         * @return 索引
-         */
-        public int getIndex(String key) {
-            int hash = key.hashCode();
-            int slot = (hash ^ (hash >>> 16)) & (STATION_CAPACITY - 1);
-            while (stations[slot] != null && !stations[slot].stationName.equals(key)) {
-                slot++;
-                if (slot == STATION_CAPACITY) {
-                    slot = 0;
-                }
-            }
-            return slot;
-        }
-
-        /**
-         * 获取对应索引的值
-         * @param index 索引
-         * @return 值
-         */
-        public StationStatistics indexOfValue(int index) {
-            return stations[index];
-        }
-
-        /**
-         * 设置对应索引的值
-         * @param index 索引
-         * @param value 值
-         */
-        public void setValue(int index, StationStatistics value) {
-            stations[index] = value;
-            indexList.add(index);
-        }
     }
 
     public static void main(String[] args) throws Exception {
@@ -269,10 +223,10 @@ public class CalculateAverageV2_1 {
 
         // 使用并行流处理每个文件块
         int coreNum = Runtime.getRuntime().availableProcessors();
-        StationMap[] stationMaps = new StationMap[coreNum];
+        Map<String, StationStatistics>[] stationMaps = new HashMap[coreNum];
         Thread[] threads = new Thread[coreNum];
         for (int i = 0; i < coreNum; i++) {
-            StationMap stationMap = new StationMap();
+            Map<String, StationStatistics> stationMap = new HashMap<>();
             stationMaps[i] = stationMap;
             Thread thread = new Thread(() -> {
                 for (int segmentIndex = segmentLock.decrementAndGet(); segmentIndex >= 0; segmentIndex = segmentLock.decrementAndGet()) {
@@ -286,18 +240,12 @@ public class CalculateAverageV2_1 {
             thread.join();
         }
         //Merge result
-        Map<String, StationStatistics> stations = new HashMap<>();
-        for (StationMap stationMap : stationMaps) {
-            for (Integer index : stationMap.indexList) {
-                StationStatistics cur = stationMap.indexOfValue(index);
-                StationStatistics old = stations.get(cur.stationName);
-                if (old != null) {
-                    old.merge(cur);
-                } else {
-                    stations.put(cur.stationName, cur);
-                }
-            }
-        }
+        Map<String, StationStatistics> stations = Stream.of(stationMaps).collect(HashMap::new, (m, v) -> {
+            v.forEach((k, vv) -> m.merge(k, vv, (v1, v2) -> {
+                v1.merge(v2);
+                return v1;
+            }));
+        }, HashMap::putAll);
         System.out.println(new TreeMap<>(stations));
         Path outPath = Paths.get("./result_me.txt");
         try (PrintStream out = new PrintStream(Files.newOutputStream(outPath, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING))) {

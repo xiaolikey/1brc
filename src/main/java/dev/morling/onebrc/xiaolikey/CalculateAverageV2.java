@@ -93,7 +93,6 @@ public class CalculateAverageV2 {
         final long start;  // 起始位置（字节偏移）
         final long length;// 块长度（字节数）
         int offset;
-        int limit;
         byte[] buffer;
 
         public FileSegment loadBytes() {
@@ -104,7 +103,6 @@ public class CalculateAverageV2 {
                         length
                 );
                 this.buffer = new byte[buffer.limit()];
-                this.limit = buffer.limit();
                 buffer.get(this.buffer);
             } catch (IOException e) {
                 //ignore
@@ -153,7 +151,7 @@ public class CalculateAverageV2 {
         }
 
         public boolean hasNext() {
-            return offset < limit;
+            return offset < length;
         }
 
         public String nextStation() {

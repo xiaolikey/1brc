@@ -132,7 +132,6 @@ public class CalculateAverageV3 {
         final long start;  // 起始位置（字节偏移）
         final long length;// 块长度（字节数）
         int offset;
-        byte[] buffer;
 
         static Unsafe unsafe = getUnsafe();
 
@@ -149,16 +148,6 @@ public class CalculateAverageV3 {
             }
         }
 
-        public FileSegment loadBytes() {
-            //copy
-            this.buffer = new byte[(int) length];
-            for (int i = 0; i < length; i++) {
-                buffer[i] = unsafe.getByte(i + start);
-            }
-            return this;
-        }
-
-
         public FileSegment collect(Map<String, StationStatistics> statMap) {
             while (hasNext()) {
                 String stationName = nextStation();
@@ -173,11 +162,6 @@ public class CalculateAverageV3 {
             return this;
         }
 
-        public void clear() {
-            //gc
-            buffer = null;
-        }
-
         public FileSegment(long start, long length) {
             this.start = start;
             this.length = length;
@@ -185,33 +169,6 @@ public class CalculateAverageV3 {
 
         public boolean hasNext() {
             return offset < length;
-        }
-
-        public String nextStationOld() {
-            int start = offset;
-            while (buffer[offset++] != ';') {
-            }
-            return new String(buffer, start, offset - start - 1);
-        }
-
-        public int nextTemperatureOld() {
-            int ans = 0;
-            boolean positive = true;
-            if (buffer[offset] == '-') {
-                positive = false;
-                offset++;
-            }
-            while (true) {
-                byte b = buffer[offset++];
-                if (b == '\n') {
-                    break;
-                }
-                if (b == '.') {
-                    continue;
-                }
-                ans = ans * 10 + b - '0';
-            }
-            return positive ? ans : -ans;
         }
 
         public String nextStation() {
@@ -225,14 +182,6 @@ public class CalculateAverageV3 {
             //skip ";"
             offset++;
             return new String(buffer, 0, i);
-        }
-
-        private static final long SEMICOLON_MASK = 0x3B3B3B3B3B3B3B3BL;
-        private static final long HIGH_BIT_MASK = 0x8080808080808080L;
-
-        public long findSemicolon(long chunk) {
-            long diff = chunk ^ SEMICOLON_MASK;
-            return (diff - 0x0101010101010101L) & (~diff & HIGH_BIT_MASK);
         }
 
         public int nextTemperature() {
@@ -257,29 +206,14 @@ public class CalculateAverageV3 {
             return positive ? ans : -ans;
         }
 
-        public int nextTemperature1() {
-            long startPos = offset + start;
-            long numberWord = unsafe.getLong(startPos);
-            int decimalSepPos = Long.numberOfTrailingZeros(~numberWord & 0x10101000L);
-            long number = convertIntoNumber(decimalSepPos, numberWord);
-            offset += ((decimalSepPos >>> 3) + 4);
-            return (int) number;
-        }
-
-
-        // Special method to convert a number in the ascii number into an int without branches created by Quan Anh Mai.
-        private static long convertIntoNumber(int decimalSepPos, long numberWord) {
-            int shift = 28 - decimalSepPos;
-            // signed is -1 if negative, 0 otherwise
-            long signed = (~numberWord << 59) >> 63;
-            long designMask = ~(signed & 0xFF);
-            // Align the number to a specific position and transform the ascii to digit value
-            long digits = ((numberWord & designMask) << shift) & 0x0F000F0F00L;
-            // Now digits is in the form 0xUU00TTHH00 (UU: units digit, TT: tens digit, HH: hundreds digit)
-            // 0xUU00TTHH00 * (100 * 0x1000000 + 10 * 0x10000 + 1) =
-            // 0x000000UU00TTHH00 + 0x00UU00TTHH000000 * 10 + 0xUU00TTHH00000000 * 100
-            long absValue = ((digits * 0x640a0001) >>> 32) & 0x3FF;
-            return (absValue ^ signed) - signed;
+        /**
+         * 如果当前long中存在分号，则返回分号位置，否则返回0
+         * @param word long
+         * @return 带有分号的问题
+         */
+        private static long findSemicolon(long word) {
+            long input = word ^ 0x3B3B3B3B3B3B3B3BL;
+            return (input - 0x0101010101010101L) & ~input & 0x8080808080808080L;
         }
 
     }
@@ -338,7 +272,7 @@ public class CalculateAverageV3 {
             stationMaps[i] = stationMap;
             Thread thread = new Thread(() -> {
                 for (int segmentIndex = segmentLock.decrementAndGet(); segmentIndex >= 0; segmentIndex = segmentLock.decrementAndGet()) {
-                    segments.get(segmentIndex).loadBytes().collect(stationMap).clear();
+                    segments.get(segmentIndex).collect(stationMap);
                 }
             });
             threads[i] = thread;
@@ -360,5 +294,6 @@ public class CalculateAverageV3 {
             out.println(new TreeMap<>(stations));
         }
     }
+
 
 }

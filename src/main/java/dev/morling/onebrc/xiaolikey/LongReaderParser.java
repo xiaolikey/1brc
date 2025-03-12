@@ -52,6 +52,31 @@ public class LongReaderParser {
         }
     }
 
+    private static final long[] MASK = new long[]{ 0xFFL, 0xFFFFL, 0xFFFFFFL, 0xFFFFFFFFL, 0xFFFFFFFFFFL, 0xFFFFFFFFFFFFL, 0xFFFFFFFFFFFFFFL, 0xFFFFFFFFFFFFFFFFL,
+            0xFFFFFFFFFFFFFFFFL };
+
+    private static long findSemicolon(long word) {
+        long input = word ^ 0x3B3B3B3B3B3B3B3BL;
+        return (input - 0x0101010101010101L) & ~input & 0x8080808080808080L;
+    }
+
+    public static long[] extractStationLongs(long[] longs){
+        long[] names = new long[2];
+
+        return names;
+    }
+
+    public static String parseName(long[] names, int len){
+        byte[] bytes = new byte[len];
+        for (int i = 0; i < len; i++) {
+            long name = names[i / 8];
+            int shift = 56 - (i % 8) * 8;
+            bytes[i] = (byte) ((name >> shift) & 0xFF);
+        }
+        return new String(bytes);
+    }
+
+
     public static void main(String[] args) {
         ByteBuffer buffer = ByteBuffer.wrap("New York;12.3\nLondon;9.8\nParis;15.6".getBytes());
         parse(buffer);

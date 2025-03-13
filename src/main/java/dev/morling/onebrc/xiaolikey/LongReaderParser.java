@@ -17,6 +17,10 @@ public class LongReaderParser {
     private static final long HIGH_BIT_MASK = 0x8080808080808080L;
 
     public static void parse(ByteBuffer buffer) {
+        int num = processFirstLongs(toLongBuffer(buffer));
+    }
+
+    public static long[] toLongBuffer(ByteBuffer buffer) {
         buffer.order(ByteOrder.nativeOrder());
         long[] longBuffer = new long[buffer.remaining() / 8 + 1];
         int longCount = 0;
@@ -35,8 +39,7 @@ public class LongReaderParser {
             }
             longBuffer[longCount++] = last;
         }
-
-        processFirstLongs(longBuffer, longCount);
+        return longBuffer;
     }
 
     private static void processLongs(long[] longs, int count) {
@@ -56,10 +59,10 @@ public class LongReaderParser {
     private static final long[] MASK = new long[]{ 0xFFL, 0xFFFFL, 0xFFFFFFL, 0xFFFFFFFFL, 0xFFFFFFFFFFL, 0xFFFFFFFFFFFFL, 0xFFFFFFFFFFFFFFL, 0xFFFFFFFFFFFFFFFFL,
             0xFFFFFFFFFFFFFFFFL };
 
-    private static void processFirstLongs(long[] longs, int count) {
+    private static int processFirstLongs(long[] longs) {
         long[] names = new long[12];
         int len = 0;
-        for (int i  = 0; i < count; i++) {
+        for (int i  = 0; i < longs.length; i++) {
             long chunk = longs[i];
             long diff = chunk ^ 0x3B3B3B3B3B3B3B3BL;
             long matches = (diff - 0x0101010101010101L) & (~diff & 0x8080808080808080L);
@@ -74,6 +77,7 @@ public class LongReaderParser {
             names[i] = chunk;
         }
         System.out.println(parseName(names, len));
+        return len;
     }
 
 
@@ -82,10 +86,27 @@ public class LongReaderParser {
         return (input - 0x0101010101010101L) & ~input & 0x8080808080808080L;
     }
 
-    public static long[] extractStationLongs(long[] longs){
-        long[] names = new long[2];
+    public static int parsTemp(long word){
+        //0 ~ 63
+        int decimalSepPos = Long.numberOfTrailingZeros(~word & 0x10101000L);
+        int num = (int)convertIntoNumber(decimalSepPos, word);
+        System.out.println(num);
+        return ((decimalSepPos >>> 3) + 3);
+    }
 
-        return names;
+    // Special method to convert a number in the ascii number into an int without branches created by Quan Anh Mai.
+    private static long convertIntoNumber(int decimalSepPos, long numberWord) {
+        int shift = 28 - decimalSepPos;
+        // signed is -1 if negative, 0 otherwise
+        long signed = (~numberWord << 59) >> 63;
+        long designMask = ~(signed & 0xFF);
+        // Align the number to a specific position and transform the ascii to digit value
+        long digits = ((numberWord & designMask) << shift) & 0x0F000F0F00L;
+        // Now digits is in the form 0xUU00TTHH00 (UU: units digit, TT: tens digit, HH: hundreds digit)
+        // 0xUU00TTHH00 * (100 * 0x1000000 + 10 * 0x10000 + 1) =
+        // 0x000000UU00TTHH00 + 0x00UU00TTHH000000 * 10 + 0xUU00TTHH00000000 * 100
+        long absValue = ((digits * 0x640a0001) >>> 32) & 0x3FF;
+        return (absValue ^ signed) - signed;
     }
 
     public static String parseName(long[] names, int len){
@@ -103,5 +124,8 @@ public class LongReaderParser {
     public static void main(String[] args) {
         ByteBuffer buffer = ByteBuffer.wrap("New York Good Monring OKJ;12.3\nLondon;9.8\nParis;15.6".getBytes());
         parse(buffer);
+        String str2 = "12.7\n-25.3\n";
+        ByteBuffer buffer1 = ByteBuffer.wrap("-1.6\n24.7\n".getBytes());
+        System.out.println(parsTemp(toLongBuffer(buffer1)[0]));
     }
 }

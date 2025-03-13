@@ -29,10 +29,15 @@ public class CalculateAverageV3 {
     //和cpu的level3 cache大小一致，24MB
     private static final long SEGMENT_SIZE = 24 * 1024 * 1024;
 
+    private static final int MAX_NAME_LONG_LENGTH = 12;
+
 
     private static final String[] TEMPERATURE_MAP = new String[999 + 1 + 999];
 
     private static AtomicInteger segmentLock = new AtomicInteger(0);
+
+    private static final long[] MASK = new long[]{0xFFL, 0xFFFFL, 0xFFFFFFL, 0xFFFFFFFFL, 0xFFFFFFFFFFL, 0xFFFFFFFFFFFFL, 0xFFFFFFFFFFFFFFL, 0xFFFFFFFFFFFFFFFFL,
+            0xFFFFFFFFFFFFFFFFL};
 
     static {
         for (int i = 0; i < 1999; i++) {
@@ -61,6 +66,7 @@ public class CalculateAverageV3 {
         int max = MAX_TEMP;
         int count;
         long sum;
+        int nameLen;
 
         public StationStatistics(int temperature) {
             this.min = temperature;
@@ -69,8 +75,10 @@ public class CalculateAverageV3 {
             this.sum = temperature;
         }
 
-        public StationStatistics(long[] nameWords, int temperature) {
+        public StationStatistics(long[] nameWords, int nameLen, int hashCode,  int temperature) {
             this.nameWords = nameWords;
+            this.nameLen = nameLen;
+            this.hashCode = (int) hashCode;
             this.min = temperature;
             this.max = temperature;
             this.count = 1;
@@ -97,11 +105,6 @@ public class CalculateAverageV3 {
             return TEMPERATURE_MAP[min + 999] + "/" + TEMPERATURE_MAP[avg + 999] + "/" + TEMPERATURE_MAP[max + 999];
         }
 
-
-        public int genHashCode() {
-            return hashCode;
-        }
-
         @Override
         public boolean equals(Object o) {
             if (this == o) return true;
@@ -122,9 +125,17 @@ public class CalculateAverageV3 {
             return hashCode;
         }
 
-        public String toStationName() {
-            return "";
+        public String parseName() {
+            byte[] bytes = new byte[nameLen];
+            for (int i = 0; i < nameLen; i++) {
+                long name = nameWords[i / 8];
+                int offset = i % 8;
+                bytes[i] = (byte) ((name & MASK[offset]) >> (offset * 8));
+                System.out.println((char) (bytes[i]));
+            }
+            return new String(bytes);
         }
+
     }
 
     // 定义文件分块信息
@@ -151,7 +162,7 @@ public class CalculateAverageV3 {
         public FileSegment collect(Map<String, StationStatistics> statMap) {
             while (hasNext()) {
                 String stationName = nextStation();
-                int temperature = nextTemperature();
+                int temperature = nextTemperatureByBytes();
                 StationStatistics cur = statMap.get(stationName);
                 if (cur == null) {
                     statMap.put(stationName, new StationStatistics(temperature));
@@ -185,6 +196,11 @@ public class CalculateAverageV3 {
         }
 
         public int nextTemperature() {
+            return offset + 8 < length ? nextTemperatureByLong() : nextTemperatureByBytes();
+        }
+
+
+        public int nextTemperatureByBytes() {
             int ans = 0;
             boolean positive = true;
 
@@ -214,6 +230,57 @@ public class CalculateAverageV3 {
         private static long findSemicolon(long word) {
             long input = word ^ 0x3B3B3B3B3B3B3B3BL;
             return (input - 0x0101010101010101L) & ~input & 0x8080808080808080L;
+        }
+
+
+
+        public StationStatistics nextRecord() {
+            long[] names = new long[MAX_NAME_LONG_LENGTH];
+            int nameLen = 0;
+            // 自定义优化后的哈希算法（见下文）
+            int hash = 0;
+            while (true) {
+                long chunk = unsafe.getLong(offset + start);
+                long matches = findSemicolon(chunk);
+                if (matches != 0) {
+                    int bytePos = ((Long.numberOfTrailingZeros(matches)) >>> 3);
+                    offset += bytePos;
+                    names[nameLen] = chunk & MASK[bytePos];
+                    hash = 31 * hash + (int)(names[nameLen] ^ (names[nameLen] >>> 32));
+                    break;
+                }
+                names[nameLen] = chunk;
+                hash = 31 * hash + (int)(chunk ^ (chunk >>> 32));
+                nameLen++;
+                offset += 8;
+            }
+            int temperature = nextTemperature();
+            return new StationStatistics(names, nameLen, hash, temperature);
+        }
+
+
+        private  int nextTemperatureByLong() {
+            long word = unsafe.getLong(offset + start);
+            //0 ~ 63
+            int decimalSepPos = Long.numberOfTrailingZeros(~word & 0x10101000L);
+            int num = (int) convertIntoNumber(decimalSepPos, word);
+            offset += ((decimalSepPos >>> 3) + 3);
+            return num;
+        }
+
+        // Special method to convert a number in the ascii number into an int without branches created by Quan Anh Mai.
+        private static long convertIntoNumber(int decimalSepPos, long numberWord) {
+            int shift = 28 - decimalSepPos;
+            // signed is -1 if negative, 0 otherwise
+            long signed = (~numberWord << 59) >> 63;
+            long designMask = ~(signed & 0xFF);
+            // Align the number to a specific position and transform the ascii to digit value
+            long digits = ((numberWord & designMask) << shift) & 0x0F000F0F00L;
+            // Now digits is in the form 0xUU00TTHH00 (UU: units digit, TT: tens digit, HH: hundreds digit)
+            // 0xUU00TTHH00 * (100 * 0x1000000 + 10 * 0x10000 + 1) =
+            // 0x000000UU00TTHH00 + 0x00UU00TTHH000000 * 10 + 0xUU00TTHH00000000 * 100
+            long absValue = ((digits * 0x640a0001) >>> 32) & 0x3FF;
+            return (absValue ^ signed) - signed;
         }
 
     }

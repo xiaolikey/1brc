@@ -12,7 +12,6 @@ import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.stream.Stream;
 
 /**
  * Calculate Average version1 implementation
@@ -21,7 +20,7 @@ import java.util.stream.Stream;
  * @date 2024/12/16
  * @since 0.0.1
  */
-public class CalculateAverageV3 {
+public class CalculateAverageV3_1 {
     private static final String FILE_PATH = "./measurements.txt";
     private static final int MAX_TEMP = 999;
     private static final int MIN_TEMP = -999;
@@ -67,6 +66,7 @@ public class CalculateAverageV3 {
         int max = MAX_TEMP;
         int count;
         long sum;
+        int nameLongLen;
         int nameLen;
 
         public StationStatistics(int temperature) {
@@ -76,8 +76,9 @@ public class CalculateAverageV3 {
             this.sum = temperature;
         }
 
-        public StationStatistics(long[] nameWords, int nameLen, int hashCode,  int temperature) {
+        public StationStatistics(long[] nameWords, int nameLongLen, int nameLen, int hashCode,  int temperature) {
             this.nameWords = nameWords;
+            this.nameLongLen = nameLongLen;
             this.nameLen = nameLen;
             this.hashCode = (int) hashCode;
             this.min = temperature;
@@ -128,11 +129,12 @@ public class CalculateAverageV3 {
 
         public String parseName() {
             byte[] bytes = new byte[nameLen];
-            for (int i = 0; i < nameLen; i++) {
+            int offset = 0;
+            for (int i = 0; i < nameLongLen; i++) {
                 long name = nameWords[i / 8];
-                int offset = i % 8;
-                bytes[i] = (byte) ((name & MASK[offset]) >> (offset * 8));
-                System.out.println((char) (bytes[i]));
+                for(int j = 0; j < 8 && j + offset < nameLen; j++, offset += j) {
+                    bytes[offset] = (byte) ((name & MASK[j]) >> (j * 8));
+                }
             }
             return new String(bytes);
         }
@@ -169,6 +171,21 @@ public class CalculateAverageV3 {
                     statMap.put(stationName, new StationStatistics(temperature));
                 } else {
                     cur.add(temperature);
+                }
+            }
+            return this;
+        }
+
+        public FileSegment collect(StationMap statMap) {
+            while (hasNext()) {
+                StationStatistics newRecord = nextRecord();
+                System.out.println(newRecord.parseName());
+                int ix = statMap.getIndex(newRecord);
+                StationStatistics cur = statMap.indexOfValue(ix);
+                if (cur == null) {
+                    statMap.setValue(ix, newRecord);
+                } else {
+                    cur.add(newRecord.min);
                 }
             }
             return this;
@@ -237,6 +254,7 @@ public class CalculateAverageV3 {
 
         public StationStatistics nextRecord() {
             long[] names = new long[MAX_NAME_LONG_LENGTH];
+            int nameLongLen = 0;
             int nameLen = 0;
             // 自定义优化后的哈希算法（见下文）
             int hash = 0;
@@ -246,17 +264,20 @@ public class CalculateAverageV3 {
                 if (matches != 0) {
                     int bytePos = ((Long.numberOfTrailingZeros(matches)) >>> 3);
                     offset += bytePos;
-                    names[nameLen] = chunk & MASK[bytePos];
-                    hash = 31 * hash + (int)(names[nameLen] ^ (names[nameLen] >>> 32));
+                    names[nameLongLen] = chunk & MASK[bytePos];
+                    hash = 31 * hash + (int)(names[nameLongLen] ^ (names[nameLongLen] >>> 32));
+                    nameLongLen++;
+                    nameLen += bytePos;
                     break;
                 }
-                names[nameLen] = chunk;
+                names[nameLongLen] = chunk;
                 hash = 31 * hash + (int)(chunk ^ (chunk >>> 32));
-                nameLen++;
+                nameLongLen++;
                 offset += 8;
+                nameLen += 8;
             }
             int temperature = nextTemperature();
-            return new StationStatistics(names, nameLen, hash, temperature);
+            return new StationStatistics(names, nameLongLen, nameLen, hash, temperature);
         }
 
 
@@ -379,10 +400,10 @@ public class CalculateAverageV3 {
 
         // 使用并行流处理每个文件块
         int coreNum = Runtime.getRuntime().availableProcessors();
-        Map<String, StationStatistics>[] stationMaps = new HashMap[coreNum];
+        StationMap[] stationMaps = new StationMap[coreNum];
         Thread[] threads = new Thread[coreNum];
         for (int i = 0; i < coreNum; i++) {
-            Map<String, StationStatistics> stationMap = new HashMap<>();
+            StationMap stationMap = new StationMap();
             stationMaps[i] = stationMap;
             Thread thread = new Thread(() -> {
                 for (int segmentIndex = segmentLock.decrementAndGet(); segmentIndex >= 0; segmentIndex = segmentLock.decrementAndGet()) {
@@ -396,12 +417,19 @@ public class CalculateAverageV3 {
             thread.join();
         }
         //Merge result
-        Map<String, StationStatistics> stations = Stream.of(stationMaps).collect(HashMap::new, (m, v) -> {
-            v.forEach((k, vv) -> m.merge(k, vv, (v1, v2) -> {
-                v1.merge(v2);
-                return v1;
-            }));
-        }, HashMap::putAll);
+        Map<String, StationStatistics> stations = new HashMap<>();
+        for (StationMap stationMap : stationMaps) {
+            for (Integer index : stationMap.indexList) {
+                StationStatistics cur = stationMap.indexOfValue(index);
+                String name = cur.parseName();
+                StationStatistics old = stations.get(name);
+                if (old != null) {
+                    old.merge(cur);
+                } else {
+                    stations.put(name, cur);
+                }
+            }
+        }
         System.out.println(new TreeMap<>(stations));
         Path outPath = Paths.get("./result_me.txt");
         try (PrintStream out = new PrintStream(Files.newOutputStream(outPath, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING))) {
